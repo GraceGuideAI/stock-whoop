@@ -2,6 +2,7 @@ export type MetricKey =
   | "recovery"
   | "sleepPerformance"
   | "sleepHours"
+  | "sleepDebtHours"
   | "strain"
   | "hrvRmssd"
   | "rhr"
@@ -37,6 +38,13 @@ export const metricDefinitions: {
     unit: "h",
     accent: "bg-sunshine-400",
     description: "Total sleep time."
+  },
+  {
+    key: "sleepDebtHours",
+    label: "Sleep Debt",
+    unit: "h",
+    accent: "bg-candy-300",
+    description: "Outstanding sleep need."
   },
   {
     key: "strain",

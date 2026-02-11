@@ -1,34 +1,25 @@
 "use client";
 
 import * as React from "react";
-import confetti from "canvas-confetti";
+import dynamic from "next/dynamic";
 import { format } from "date-fns";
-import {
-  LineChart,
-  Line,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis
-} from "recharts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ToggleGroup } from "@/components/ui/toggle-group";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow
-} from "@/components/ui/table";
-import { metricDefinitions, type MetricKey } from "@/lib/metrics";
 import type { DailyMetricRecord, MetricsResponse } from "@/lib/types";
-import { cn } from "@/lib/utils";
+
+const TrendCharts = dynamic(() => import("@/components/dashboard/trend-charts"), {
+  ssr: false,
+  loading: () => (
+    <div className="grid gap-3 sm:gap-4">
+      <div className="h-60 animate-pulse rounded-3xl bg-white/70" />
+      <div className="h-60 animate-pulse rounded-3xl bg-white/70" />
+    </div>
+  )
+});
 
 const timeframeOptions = [
-  { label: "1D", value: "1D" },
   { label: "1W", value: "1W" },
   { label: "1M", value: "1M" },
   { label: "3M", value: "3M" },
@@ -36,40 +27,36 @@ const timeframeOptions = [
   { label: "All", value: "All" }
 ];
 
+function avg(values: Array<number | undefined>) {
+  const nums = values.filter((v): v is number => typeof v === "number");
+  if (!nums.length) return undefined;
+  return nums.reduce((acc, v) => acc + v, 0) / nums.length;
+}
+
 function formatValue(value: number | undefined, unit: string) {
   if (value === undefined || Number.isNaN(value)) return "--";
-  const rounded = unit === "" ? value.toFixed(1) : value.toFixed(1);
-  if (unit === "%") return `${Math.round(value)}${unit}`;
-  if (unit === "h") return `${value.toFixed(1)}${unit}`;
-  if (unit === "kcal") return `${Math.round(value)} ${unit}`;
-  if (unit === "bpm") return `${Math.round(value)} ${unit}`;
-  if (unit === "ms") return `${Math.round(value)} ${unit}`;
-  if (unit === "°C") return `${value.toFixed(2)} ${unit}`;
-  if (unit === "rpm") return `${value.toFixed(1)} ${unit}`;
-  return unit ? `${rounded} ${unit}` : rounded;
+  if (unit === "%") return `${Math.round(value)}%`;
+  if (unit === "h") return `${value.toFixed(1)}h`;
+  if (unit === "ms") return `${Math.round(value)} ms`;
+  if (unit === "bpm") return `${Math.round(value)} bpm`;
+  return `${value.toFixed(1)} ${unit}`.trim();
 }
 
 function computeDelta(current?: number, previous?: number) {
   if (current === undefined || previous === undefined) return null;
   const diff = current - previous;
-  const percent = previous === 0 ? null : (diff / previous) * 100;
-  return { diff, percent };
+  return { diff, up: diff >= 0 };
 }
 
-export function MetricsDashboard() {
-  const [timeframe, setTimeframe] = React.useState("1M");
-  const [data, setData] = React.useState<DailyMetricRecord[]>([]);
-  const [loading, setLoading] = React.useState(true);
-  const celebrated = React.useRef(new Set<MetricKey>());
+type Props = {
+  initialTimeframe?: string;
+  initialData?: DailyMetricRecord[];
+};
 
-  const dataWithDate = React.useMemo(
-    () =>
-      data.map((row) => ({
-        ...row,
-        dateObj: new Date(row.date)
-      })),
-    [data]
-  );
+export function MetricsDashboard({ initialTimeframe = "1M", initialData = [] }: Props) {
+  const [timeframe, setTimeframe] = React.useState(initialTimeframe);
+  const [data, setData] = React.useState<DailyMetricRecord[]>(initialData);
+  const [loading, setLoading] = React.useState(false);
 
   React.useEffect(() => {
     const controller = new AbortController();
@@ -80,84 +67,94 @@ export function MetricsDashboard() {
         if (!res.ok) throw new Error("Failed to load metrics");
         return res.json();
       })
-      .then((payload: MetricsResponse) => {
-        setData(payload.data ?? []);
-      })
+      .then((payload: MetricsResponse) => setData(payload.data ?? []))
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError") return;
-        setData([]);
       })
-      .finally(() => {
-        setLoading(false);
-      });
+      .finally(() => setLoading(false));
 
-    return () => {
-      controller.abort();
-    };
+    return () => controller.abort();
   }, [timeframe]);
 
   const latest = data[data.length - 1];
   const previous = data[data.length - 2];
 
-  function valueBefore(metric: MetricKey, daysBack: number) {
+  const readiness = React.useMemo(() => {
     if (!latest) return undefined;
-    const target = new Date(latest.date);
-    target.setDate(target.getDate() - daysBack);
-    for (let i = dataWithDate.length - 1; i >= 0; i -= 1) {
-      const row = dataWithDate[i];
-      if (row.dateObj <= target && typeof row[metric] === "number") {
-        return row[metric] as number;
-      }
+    return avg([latest.recovery, latest.sleepPerformance]);
+  }, [latest]);
+
+  const sleepDebt7d = React.useMemo(
+    () => avg(data.slice(-7).map((row) => row.sleepDebtHours)),
+    [data]
+  );
+
+  const strainTarget = React.useMemo(() => {
+    if (!latest?.recovery) return undefined;
+    if (latest.recovery >= 67) return "15-18";
+    if (latest.recovery >= 34) return "11-14";
+    return "6-10";
+  }, [latest?.recovery]);
+
+  const coachingInsight = React.useMemo(() => {
+    if (!latest) return "Load your WHOOP data to generate coaching guidance.";
+
+    if ((latest.sleepDebtHours ?? 0) > 2.5) {
+      return "Sleep debt is elevated. Prioritize bedtime consistency and cap strain to moderate today.";
     }
-    return undefined;
-  }
 
-  const maxByMetric = React.useMemo(() => {
-    const max: Partial<Record<MetricKey, number>> = {};
-    metricDefinitions.forEach((metric) => {
-      const values = data
-        .map((row) => row[metric.key])
-        .filter((value): value is number => typeof value === "number");
-      max[metric.key] = values.length ? Math.max(...values) : undefined;
-    });
-    return max;
-  }, [data]);
+    if ((latest.recovery ?? 0) >= 67 && (latest.strain ?? 0) < 12) {
+      return "You look primed. Consider a progressive strain build while recovery is in the green.";
+    }
 
-  React.useEffect(() => {
-    metricDefinitions.forEach((metric) => {
-      const current = latest?.[metric.key];
-      const maxValue = maxByMetric[metric.key];
-      if (
-        typeof current === "number" &&
-        typeof maxValue === "number" &&
-        current === maxValue &&
-        !celebrated.current.has(metric.key)
-      ) {
-        confetti({
-          particleCount: 90,
-          spread: 70,
-          startVelocity: 40,
-          origin: { y: 0.7 }
-        });
-        celebrated.current.add(metric.key);
-      }
-    });
-  }, [latest, maxByMetric]);
+    if ((latest.recovery ?? 0) < 34) {
+      return "Readiness is low. Keep intensity light and focus on hydration plus earlier sleep.";
+    }
+
+    return "Balanced day. Match strain to recovery and defend sleep to keep momentum.";
+  }, [latest]);
+
+  const keyCards = [
+    {
+      label: "Readiness",
+      value: formatValue(readiness, "%"),
+      helper: "Recovery + sleep performance",
+      delta: computeDelta(readiness, avg([previous?.recovery, previous?.sleepPerformance])),
+      color: "bg-limepop-400"
+    },
+    {
+      label: "Recovery",
+      value: formatValue(latest?.recovery, "%"),
+      helper: "Autonomic bounce-back",
+      delta: computeDelta(latest?.recovery, previous?.recovery),
+      color: "bg-limepop-500"
+    },
+    {
+      label: "Sleep Debt",
+      value: formatValue(latest?.sleepDebtHours, "h"),
+      helper: `7d avg ${formatValue(sleepDebt7d, "h")}`,
+      delta: computeDelta(latest?.sleepDebtHours, previous?.sleepDebtHours),
+      color: "bg-sunshine-500"
+    },
+    {
+      label: "Strain",
+      value: latest?.strain?.toFixed(1) ?? "--",
+      helper: `Target band ${strainTarget ?? "--"}`,
+      delta: computeDelta(latest?.strain, previous?.strain),
+      color: "bg-candy-500"
+    }
+  ];
 
   return (
     <div className="flex flex-col gap-4 sm:gap-5">
       <div className="sticky top-2 z-20 rounded-2xl bg-white/90 p-2 shadow-card backdrop-blur-lg sm:top-3 sm:p-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
-            <p className="text-[10px] uppercase tracking-[0.28em] text-ink/55 sm:text-xs">
-              WHOOP Portfolio
-            </p>
-            <h2 className="font-display text-2xl leading-tight sm:text-3xl">
-              Performance Market
-            </h2>
+            <p className="text-[10px] uppercase tracking-[0.28em] text-ink/55 sm:text-xs">Health cockpit</p>
+            <h2 className="font-display text-2xl leading-tight sm:text-3xl">Daily decision board</h2>
             <p className="mt-1 text-xs text-ink/65 sm:text-sm">
               {latest?.date
-                ? `Last sync: ${format(new Date(latest.date), "MMM d, yyyy")}`
+                ? `Last sync: ${format(new Date(`${latest.date}T00:00:00.000Z`), "MMM d, yyyy")}`
                 : "Load your WHOOP data to see live trends."}
             </p>
           </div>
@@ -165,233 +162,94 @@ export function MetricsDashboard() {
         </div>
       </div>
 
-      <section className="grid gap-3 sm:gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {metricDefinitions.slice(0, 6).map((metric) => {
-          const value = latest?.[metric.key];
-          const delta = computeDelta(value, previous?.[metric.key]);
-          const delta1d = computeDelta(value, valueBefore(metric.key, 1));
-          const delta1w = computeDelta(value, valueBefore(metric.key, 7));
-          const delta1m = computeDelta(value, valueBefore(metric.key, 30));
-          const isRecord = typeof value === "number" && value === maxByMetric[metric.key];
-          const chartData = data.map((row) => ({
-            date: row.date,
-            value: row[metric.key]
-          }));
-
-          return (
-            <Card key={metric.key} className="relative overflow-hidden">
-              <div className={cn("absolute left-0 top-0 h-1.5 w-full", metric.accent)} />
-              <CardHeader className="p-4 pb-1.5 sm:p-5 sm:pb-2">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <CardTitle className="text-base sm:text-lg">{metric.label}</CardTitle>
-                    <p className="text-[11px] text-ink/60 sm:text-xs">{metric.description}</p>
-                  </div>
-                  {isRecord ? <Badge variant="candy">PR!</Badge> : null}
-                </div>
-              </CardHeader>
-              <CardContent className="flex items-end justify-between gap-3 p-4 pt-1.5 sm:p-5 sm:pt-2">
-                <div>
-                  <p className="text-2xl font-semibold leading-none sm:text-3xl">
-                    {formatValue(value, metric.unit)}
-                  </p>
-                  <p className="mt-1 text-[11px] text-ink/60 sm:text-xs">
-                    {delta
-                      ? `${delta.diff >= 0 ? "+" : ""}${delta.diff.toFixed(1)}${
-                          delta.percent !== null
-                            ? ` (${delta.percent >= 0 ? "+" : ""}${delta.percent.toFixed(1)}%)`
-                            : ""
-                        }`
-                      : "No previous data"}
-                  </p>
-                  <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-ink/60 sm:gap-2 sm:text-[11px]">
-                    {[
-                      { label: "1D", delta: delta1d },
-                      { label: "1W", delta: delta1w },
-                      { label: "1M", delta: delta1m }
-                    ].map((item) => (
-                      <span key={item.label} className="rounded-full bg-ink/5 px-2 py-1">
-                        Δ{item.label}:{" "}
-                        {item.delta
-                          ? `${item.delta.diff >= 0 ? "+" : ""}${item.delta.diff.toFixed(1)}`
-                          : "--"}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-                <div className="h-14 w-24 shrink-0 sm:h-16 sm:w-28">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={chartData}>
-                      <Line type="monotone" dataKey="value" stroke="#ff3d86" strokeWidth={2} dot={false} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              </CardContent>
-            </Card>
-          );
-        })}
+      <section className="grid gap-3 sm:gap-4 md:grid-cols-2 xl:grid-cols-4">
+        {keyCards.map((card) => (
+          <Card key={card.label} className="relative overflow-hidden">
+            <div className={`absolute left-0 top-0 h-1.5 w-full ${card.color}`} />
+            <CardHeader className="p-4 pb-2 sm:p-5 sm:pb-2">
+              <CardTitle className="text-base">{card.label}</CardTitle>
+              <p className="text-xs text-ink/60">{card.helper}</p>
+            </CardHeader>
+            <CardContent className="p-4 pt-1 sm:p-5 sm:pt-1">
+              <p className="text-3xl font-semibold leading-none">{card.value}</p>
+              <p className="mt-2 text-xs text-ink/60">
+                {card.delta
+                  ? `${card.delta.up ? "+" : ""}${card.delta.diff.toFixed(1)} vs prior day`
+                  : "No prior day comparison"}
+              </p>
+            </CardContent>
+          </Card>
+        ))}
       </section>
 
       <section className="grid gap-3 sm:gap-4 lg:grid-cols-[1.2fr_1fr]">
         <Card>
           <CardHeader className="p-4 pb-2 sm:p-5 sm:pb-2">
-            <CardTitle>Metric Watchlist</CardTitle>
-            <p className="text-xs text-ink/60">Scan your personal market board.</p>
+            <CardTitle>Session plan</CardTitle>
+            <p className="text-xs text-ink/60">Actionable pacing for training and recovery.</p>
           </CardHeader>
-          <CardContent className="p-0 sm:p-0">
-            <div className="space-y-2 px-3 pb-3 sm:hidden">
-              {metricDefinitions.map((metric) => {
-                const value = latest?.[metric.key];
-                const delta = computeDelta(value, previous?.[metric.key]);
-                return (
-                  <div
-                    key={metric.key}
-                    className="flex items-center justify-between rounded-2xl border border-ink/10 bg-white px-3 py-2.5"
-                  >
-                    <div>
-                      <p className="text-sm font-semibold">{metric.label}</p>
-                      <p className="text-xs text-ink/60">
-                        {delta ? `${delta.diff >= 0 ? "+" : ""}${delta.diff.toFixed(1)}` : "--"}
-                      </p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-sm font-semibold">{formatValue(value, metric.unit)}</p>
-                      {value === maxByMetric[metric.key] ? (
-                        <Badge variant="candy" className="mt-1">
-                          Record
-                        </Badge>
-                      ) : (
-                        <Badge variant="sky" className="mt-1">
-                          Tracking
-                        </Badge>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+          <CardContent className="space-y-2 p-4 pt-2 sm:p-5 sm:pt-2">
+            <div className="rounded-2xl bg-limepop-50 p-3">
+              <p className="text-sm font-semibold">Readiness lane</p>
+              <p className="text-xs text-ink/65">
+                Aim for strain <span className="font-semibold">{strainTarget ?? "--"}</span> based on current recovery.
+              </p>
             </div>
-
-            <div className="hidden sm:block">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Metric</TableHead>
-                    <TableHead>Latest</TableHead>
-                    <TableHead>Change</TableHead>
-                    <TableHead>Status</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {metricDefinitions.map((metric) => {
-                    const value = latest?.[metric.key];
-                    const delta = computeDelta(value, previous?.[metric.key]);
-                    return (
-                      <TableRow key={metric.key}>
-                        <TableCell className="font-semibold">{metric.label}</TableCell>
-                        <TableCell>{formatValue(value, metric.unit)}</TableCell>
-                        <TableCell>
-                          {delta ? `${delta.diff >= 0 ? "+" : ""}${delta.diff.toFixed(1)}` : "--"}
-                        </TableCell>
-                        <TableCell>
-                          {value === maxByMetric[metric.key] ? (
-                            <Badge variant="candy">Record</Badge>
-                          ) : (
-                            <Badge variant="sky">Tracking</Badge>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
+            <div className="rounded-2xl bg-skybolt-50 p-3">
+              <p className="text-sm font-semibold">Sleep guardrail</p>
+              <p className="text-xs text-ink/65">
+                Sleep performance is {formatValue(latest?.sleepPerformance, "%")}. Keep wake time consistent to lower debt.
+              </p>
+            </div>
+            <div className="rounded-2xl bg-candy-50 p-3">
+              <p className="text-sm font-semibold">Coaching insight</p>
+              <p className="text-xs text-ink/65">{coachingInsight}</p>
             </div>
           </CardContent>
         </Card>
 
-        <Card id="insights">
+        <Card>
           <CardHeader className="p-4 pb-2 sm:p-5 sm:pb-2">
-            <CardTitle>Market Mood</CardTitle>
-            <p className="text-xs text-ink/60">Quick narrative for your trend line.</p>
+            <CardTitle>Vitals snapshot</CardTitle>
+            <p className="text-xs text-ink/60">Signals that explain trend direction.</p>
           </CardHeader>
-          <CardContent className="space-y-3 p-4 pt-2 sm:space-y-4 sm:p-5 sm:pt-2">
-            <div className="rounded-2xl bg-skybolt-50 p-3 sm:p-4">
-              <p className="text-sm font-semibold">Recovery momentum</p>
-              <p className="text-xs text-ink/60">
-                {latest?.recovery
-                  ? `Recovery is hovering around ${latest.recovery}%. Keep strain aligned.`
-                  : "Load data to unlock insights."}
-              </p>
-            </div>
-            <div className="rounded-2xl bg-limepop-50 p-3 sm:p-4">
-              <p className="text-sm font-semibold">Sleep trend</p>
-              <p className="text-xs text-ink/60">
-                {latest?.sleepPerformance
-                  ? `Sleep performance sits near ${latest.sleepPerformance}%.`
-                  : "No sleep data yet."}
-              </p>
-            </div>
-            <div className="rounded-2xl bg-candy-50 p-3 sm:p-4">
-              <p className="text-sm font-semibold">Strain balance</p>
-              <p className="text-xs text-ink/60">
-                {latest?.strain ? `Today’s strain is ${latest.strain.toFixed(1)}.` : "Strain data incoming."}
-              </p>
-            </div>
+          <CardContent className="space-y-2 p-4 pt-2 sm:p-5 sm:pt-2">
+            {[
+              ["HRV", formatValue(latest?.hrvRmssd, "ms")],
+              ["RHR", formatValue(latest?.rhr, "bpm")],
+              ["Respiratory", formatValue(latest?.respiratoryRate, "rpm")],
+              ["Skin temp", formatValue(latest?.skinTempC, "°C")]
+            ].map(([label, value]) => (
+              <div key={label} className="flex items-center justify-between rounded-xl border border-ink/10 px-3 py-2.5">
+                <p className="text-sm text-ink/75">{label}</p>
+                <p className="text-sm font-semibold">{value}</p>
+              </div>
+            ))}
           </CardContent>
         </Card>
       </section>
 
-      <section id="history" className="grid gap-3 sm:gap-4">
-        <div className="px-1">
-          <p className="text-[10px] uppercase tracking-[0.28em] text-ink/55 sm:text-xs">History</p>
-          <h3 className="font-display text-2xl">Trend charts</h3>
-        </div>
-
-        {metricDefinitions.map((metric) => {
-          const chartData = data.map((row) => ({
-            date: row.date,
-            value: row[metric.key]
-          }));
-
-          return (
-            <Card key={metric.key}>
-              <CardHeader className="p-4 pb-2 sm:p-5 sm:pb-2">
-                <CardTitle>{metric.label} Trend</CardTitle>
-                <p className="text-xs text-ink/60">{metric.description}</p>
-              </CardHeader>
-              <CardContent className="h-48 p-2 pt-1 sm:h-64 sm:p-5 sm:pt-2">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={chartData}>
-                    <XAxis dataKey="date" tickLine={false} axisLine={false} hide />
-                    <YAxis tickLine={false} axisLine={false} width={28} />
-                    <Tooltip
-                      contentStyle={{
-                        borderRadius: 12,
-                        border: "none",
-                        boxShadow: "0 12px 30px rgba(16,17,19,0.15)"
-                      }}
-                    />
-                    <Line type="monotone" dataKey="value" stroke="#1aa8ff" strokeWidth={2.5} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </CardContent>
-            </Card>
-          );
-        })}
-      </section>
+      {data.length > 0 ? <TrendCharts data={data} /> : null}
 
       <div className="pointer-events-none fixed inset-x-0 bottom-3 z-30 flex justify-center sm:hidden">
         <div className="pointer-events-auto rounded-full bg-white/90 p-1.5 shadow-card backdrop-blur-lg">
           <Button size="sm" variant="outline" onClick={() => document.getElementById("history")?.scrollIntoView({ behavior: "smooth" })}>
-            Jump to history
+            Jump to trends
           </Button>
         </div>
       </div>
 
       {loading ? (
-        <div className="rounded-2xl bg-white/80 p-4 text-center text-sm text-ink/60 sm:rounded-3xl sm:p-6">
-          Loading metrics...
+        <div className="rounded-2xl bg-white/80 p-3 text-center text-xs text-ink/60 sm:rounded-3xl sm:p-4 sm:text-sm">
+          Refreshing latest metrics…
         </div>
       ) : null}
+
+      <div className="flex justify-end">
+        <Badge variant="sky" className="text-[11px]">
+          Health-first layout · stock-inspired signals
+        </Badge>
+      </div>
     </div>
   );
 }
